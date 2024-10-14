@@ -12,7 +12,6 @@ jieba
 jiwer
 librosa
 matplotlib
-numpy==1.23.5
 pydub
 pypinyin
 safetensors

@@ -21,20 +21,6 @@ import librosa
 import click
 import soundfile as sf
 
-try:
-    import spaces
-    USING_SPACES = True
-except ImportError:
-    USING_SPACES = False
-
-def gpu_decorator(func):
-    if USING_SPACES:
-        return spaces.GPU(func)
-    else:
-        return func
-
-
-
 SPLIT_WORDS = [
     "but", "however", "nevertheless", "yet", "still",
     "therefore", "thus", "hence", "consequently",
@@ -294,7 +280,7 @@ def infer_batch(ref_audio, ref_text, gen_text_batches, exp_name, remove_silence,
 
     return (target_sample_rate, final_wave), spectrogram_path
 
-def infer(ref_audio_orig, ref_text, gen_text, exp_name, remove_silence, custom_split_words=''):
+def infer(ref_audio_orig, ref_text, gen_text, exp_name, remove_silence, custom_split_words):
     if not custom_split_words.strip():
         custom_words = [word.strip() for word in custom_split_words.split(',')]
         global SPLIT_WORDS
@@ -415,20 +401,24 @@ def parse_speechtypes_text(gen_text):
 
     return segments
 
-def update_speed(new_speed):
-    global speed
-    speed = new_speed
-    return f"Speed set to: {speed}"
+with gr.Blocks() as app:
+    gr.Markdown(
+        """
+# E2/F5 TTS with Advanced Batch Processing
 
-with gr.Blocks() as app_credits:
-    gr.Markdown("""
-# Credits
+This is a local web UI for F5 TTS with advanced batch processing support, based on the unofficial [online demo](https://huggingface.co/spaces/mrfakename/E2-F5-TTS) supported by [mrfakename](https://github.com/fakerybakery). This app supports the following TTS models:
 
-* [mrfakename](https://github.com/fakerybakery) for the original [online demo](https://huggingface.co/spaces/mrfakename/E2-F5-TTS)
-* [RootingInLoad](https://github.com/RootingInLoad) for the podcast generation
-""")
-with gr.Blocks() as app_tts:
-    gr.Markdown("# Batched TTS")
+* [F5-TTS](https://arxiv.org/abs/2410.06885) (A Fairytaler that Fakes Fluent and Faithful Speech with Flow Matching)
+* [E2 TTS](https://arxiv.org/abs/2406.18009) (Embarrassingly Easy Fully Non-Autoregressive Zero-Shot TTS)
+
+The checkpoints support English and Chinese.
+
+If you're having issues, try converting your reference audio to WAV or MP3, clipping it to 15s, and shortening your prompt.
+
+**NOTE: Reference text will be automatically transcribed with Whisper if not provided. For best results, keep your reference clips short (<15s). Ensure the audio is fully uploaded before generating.**
+"""
+    )
+
     ref_audio_input = gr.Audio(label="Reference Audio", type="filepath")
     gen_text_input = gr.Textbox(label="Text to Generate", lines=10)
     model_choice = gr.Radio(
@@ -451,15 +441,6 @@ with gr.Blocks() as app_tts:
             info="Enter custom words to split on, separated by commas. Leave blank to use default list.",
             lines=2,
         )
-        speed_slider = gr.Slider(
-            label="Speed",
-            minimum=0.3,
-            maximum=2.0,
-            value=speed,
-            step=0.1,
-            info="Adjust the speed of the audio.",
-        )
-    speed_slider.change(update_speed, inputs=speed_slider)
 
     audio_output = gr.Audio(label="Synthesized Audio")
     spectrogram_output = gr.Image(label="Spectrogram")
@@ -477,32 +458,38 @@ with gr.Blocks() as app_tts:
         outputs=[audio_output, spectrogram_output],
     )
     
-with gr.Blocks() as app_podcast:
-    gr.Markdown("# Podcast Generation")
-    speaker1_name = gr.Textbox(label="Speaker 1 Name")
-    ref_audio_input1 = gr.Audio(label="Reference Audio (Speaker 1)", type="filepath")
-    ref_text_input1 = gr.Textbox(label="Reference Text (Speaker 1)", lines=2)
-    
-    speaker2_name = gr.Textbox(label="Speaker 2 Name")
-    ref_audio_input2 = gr.Audio(label="Reference Audio (Speaker 2)", type="filepath")
-    ref_text_input2 = gr.Textbox(label="Reference Text (Speaker 2)", lines=2)
-    
-    script_input = gr.Textbox(label="Podcast Script", lines=10, 
-                                placeholder="Enter the script with speaker names at the start of each block, e.g.:\nSean: How did you start studying...\n\nMeghan: I came to my interest in technology...\nIt was a long journey...\n\nSean: That's fascinating. Can you elaborate...")
-    
-    podcast_model_choice = gr.Radio(
-        choices=["F5-TTS", "E2-TTS"], label="Choose TTS Model", value="F5-TTS"
-    )
-    podcast_remove_silence = gr.Checkbox(
-        label="Remove Silences",
-        value=True,
-    )
-    generate_podcast_btn = gr.Button("Generate Podcast", variant="primary")
-    podcast_output = gr.Audio(label="Generated Podcast")
+    gr.Markdown(
+        """
+# Podcast Generation
 
+Supported by [RootingInLoad](https://github.com/RootingInLoad)
+"""
+    )
+    with gr.Tab("Podcast Generation"):
+        speaker1_name = gr.Textbox(label="Speaker 1 Name")
+        ref_audio_input1 = gr.Audio(label="Reference Audio (Speaker 1)", type="filepath")
+        ref_text_input1 = gr.Textbox(label="Reference Text (Speaker 1)", lines=2)
+        
+        speaker2_name = gr.Textbox(label="Speaker 2 Name")
+        ref_audio_input2 = gr.Audio(label="Reference Audio (Speaker 2)", type="filepath")
+        ref_text_input2 = gr.Textbox(label="Reference Text (Speaker 2)", lines=2)
+        
+        script_input = gr.Textbox(label="Podcast Script", lines=10, 
+                                  placeholder="Enter the script with speaker names at the start of each block, e.g.:\nSean: How did you start studying...\n\nMeghan: I came to my interest in technology...\nIt was a long journey...\n\nSean: That's fascinating. Can you elaborate...")
+        
+        podcast_model_choice = gr.Radio(
+            choices=["F5-TTS", "E2-TTS"], label="Choose TTS Model", value="F5-TTS"
+        )
+        podcast_remove_silence = gr.Checkbox(
+            label="Remove Silences",
+            value=True,
+        )
+        generate_podcast_btn = gr.Button("Generate Podcast", variant="primary")
+        podcast_output = gr.Audio(label="Generated Podcast")
+    
     def podcast_generation(script, speaker1, ref_audio1, ref_text1, speaker2, ref_audio2, ref_text2, model, remove_silence):
         return generate_podcast(script, speaker1, ref_audio1, ref_text1, speaker2, ref_audio2, ref_text2, model, remove_silence)
-
+    
     generate_podcast_btn.click(
         podcast_generation,
         inputs=[
@@ -519,31 +506,30 @@ with gr.Blocks() as app_podcast:
         outputs=podcast_output,
     )
 
-def parse_emotional_text(gen_text):
-    # Pattern to find (Emotion)
-    pattern = r'\((.*?)\)'
+    def parse_emotional_text(gen_text):
+        # Pattern to find (Emotion)
+        pattern = r'\((.*?)\)'
 
-    # Split the text by the pattern
-    tokens = re.split(pattern, gen_text)
+        # Split the text by the pattern
+        tokens = re.split(pattern, gen_text)
 
-    segments = []
+        segments = []
 
-    current_emotion = 'Regular'
+        current_emotion = 'Regular'
 
-    for i in range(len(tokens)):
-        if i % 2 == 0:
-            # This is text
-            text = tokens[i].strip()
-            if text:
-                segments.append({'emotion': current_emotion, 'text': text})
-        else:
-            # This is emotion
-            emotion = tokens[i].strip()
-            current_emotion = emotion
+        for i in range(len(tokens)):
+            if i % 2 == 0:
+                # This is text
+                text = tokens[i].strip()
+                if text:
+                    segments.append({'emotion': current_emotion, 'text': text})
+            else:
+                # This is emotion
+                emotion = tokens[i].strip()
+                current_emotion = emotion
 
-    return segments
+        return segments
 
-with gr.Blocks() as app_emotional:
     # New section for emotional generation
     gr.Markdown(
         """
@@ -557,250 +543,233 @@ with gr.Blocks() as app_emotional:
     """
     )
 
-    gr.Markdown("Upload different audio clips for each speech type. 'Regular' emotion is mandatory. You can add additional speech types by clicking the 'Add Speech Type' button.")
+    with gr.Tab("Multiple Speech-Type Generation"):
+        gr.Markdown("Upload different audio clips for each speech type. 'Regular' emotion is mandatory. You can add additional speech types by clicking the 'Add Speech Type' button.")
 
-    # Regular speech type (mandatory)
-    with gr.Row():
-        regular_name = gr.Textbox(value='Regular', label='Speech Type Name', interactive=False)
-        regular_audio = gr.Audio(label='Regular Reference Audio', type='filepath')
-        regular_ref_text = gr.Textbox(label='Reference Text (Regular)', lines=2)
-
-    # Additional speech types (up to 9 more)
-    max_speech_types = 10
-    speech_type_names = []
-    speech_type_audios = []
-    speech_type_ref_texts = []
-    speech_type_delete_btns = []
-
-    for i in range(max_speech_types - 1):
+        # Regular speech type (mandatory)
         with gr.Row():
-            name_input = gr.Textbox(label='Speech Type Name', visible=False)
-            audio_input = gr.Audio(label='Reference Audio', type='filepath', visible=False)
-            ref_text_input = gr.Textbox(label='Reference Text', lines=2, visible=False)
-            delete_btn = gr.Button("Delete", variant="secondary", visible=False)
-        speech_type_names.append(name_input)
-        speech_type_audios.append(audio_input)
-        speech_type_ref_texts.append(ref_text_input)
-        speech_type_delete_btns.append(delete_btn)
+            regular_name = gr.Textbox(value='Regular', label='Speech Type Name', interactive=False)
+            regular_audio = gr.Audio(label='Regular Reference Audio', type='filepath')
+            regular_ref_text = gr.Textbox(label='Reference Text (Regular)', lines=2)
 
-    # Button to add speech type
-    add_speech_type_btn = gr.Button("Add Speech Type")
+        # Additional speech types (up to 9 more)
+        max_speech_types = 10
+        speech_type_names = []
+        speech_type_audios = []
+        speech_type_ref_texts = []
+        speech_type_delete_btns = []
 
-    # Keep track of current number of speech types
-    speech_type_count = gr.State(value=0)
+        for i in range(max_speech_types - 1):
+            with gr.Row():
+                name_input = gr.Textbox(label='Speech Type Name', visible=False)
+                audio_input = gr.Audio(label='Reference Audio', type='filepath', visible=False)
+                ref_text_input = gr.Textbox(label='Reference Text', lines=2, visible=False)
+                delete_btn = gr.Button("Delete", variant="secondary", visible=False)
+            speech_type_names.append(name_input)
+            speech_type_audios.append(audio_input)
+            speech_type_ref_texts.append(ref_text_input)
+            speech_type_delete_btns.append(delete_btn)
 
-    # Function to add a speech type
-    def add_speech_type_fn(speech_type_count):
-        if speech_type_count < max_speech_types - 1:
-            speech_type_count += 1
-            # Prepare updates for the components
-            name_updates = []
-            audio_updates = []
-            ref_text_updates = []
-            delete_btn_updates = []
-            for i in range(max_speech_types - 1):
-                if i < speech_type_count:
-                    name_updates.append(gr.update(visible=True))
-                    audio_updates.append(gr.update(visible=True))
-                    ref_text_updates.append(gr.update(visible=True))
-                    delete_btn_updates.append(gr.update(visible=True))
-                else:
-                    name_updates.append(gr.update())
-                    audio_updates.append(gr.update())
-                    ref_text_updates.append(gr.update())
-                    delete_btn_updates.append(gr.update())
-        else:
-            # Optionally, show a warning
-            # gr.Warning("Maximum number of speech types reached.")
-            name_updates = [gr.update() for _ in range(max_speech_types - 1)]
-            audio_updates = [gr.update() for _ in range(max_speech_types - 1)]
-            ref_text_updates = [gr.update() for _ in range(max_speech_types - 1)]
-            delete_btn_updates = [gr.update() for _ in range(max_speech_types - 1)]
-        return [speech_type_count] + name_updates + audio_updates + ref_text_updates + delete_btn_updates
+        # Button to add speech type
+        add_speech_type_btn = gr.Button("Add Speech Type")
 
-    add_speech_type_btn.click(
-        add_speech_type_fn,
-        inputs=speech_type_count,
-        outputs=[speech_type_count] + speech_type_names + speech_type_audios + speech_type_ref_texts + speech_type_delete_btns
-    )
+        # Keep track of current number of speech types
+        speech_type_count = gr.State(value=0)
 
-    # Function to delete a speech type
-    def make_delete_speech_type_fn(index):
-        def delete_speech_type_fn(speech_type_count):
-            # Prepare updates
-            name_updates = []
-            audio_updates = []
-            ref_text_updates = []
-            delete_btn_updates = []
-
-            for i in range(max_speech_types - 1):
-                if i == index:
-                    name_updates.append(gr.update(visible=False, value=''))
-                    audio_updates.append(gr.update(visible=False, value=None))
-                    ref_text_updates.append(gr.update(visible=False, value=''))
-                    delete_btn_updates.append(gr.update(visible=False))
-                else:
-                    name_updates.append(gr.update())
-                    audio_updates.append(gr.update())
-                    ref_text_updates.append(gr.update())
-                    delete_btn_updates.append(gr.update())
-
-            speech_type_count = max(0, speech_type_count - 1)
-
+        # Function to add a speech type
+        def add_speech_type_fn(speech_type_count):
+            if speech_type_count < max_speech_types - 1:
+                speech_type_count += 1
+                # Prepare updates for the components
+                name_updates = []
+                audio_updates = []
+                ref_text_updates = []
+                delete_btn_updates = []
+                for i in range(max_speech_types - 1):
+                    if i < speech_type_count:
+                        name_updates.append(gr.update(visible=True))
+                        audio_updates.append(gr.update(visible=True))
+                        ref_text_updates.append(gr.update(visible=True))
+                        delete_btn_updates.append(gr.update(visible=True))
+                    else:
+                        name_updates.append(gr.update())
+                        audio_updates.append(gr.update())
+                        ref_text_updates.append(gr.update())
+                        delete_btn_updates.append(gr.update())
+            else:
+                # Optionally, show a warning
+                # gr.Warning("Maximum number of speech types reached.")
+                name_updates = [gr.update() for _ in range(max_speech_types - 1)]
+                audio_updates = [gr.update() for _ in range(max_speech_types - 1)]
+                ref_text_updates = [gr.update() for _ in range(max_speech_types - 1)]
+                delete_btn_updates = [gr.update() for _ in range(max_speech_types - 1)]
             return [speech_type_count] + name_updates + audio_updates + ref_text_updates + delete_btn_updates
 
-        return delete_speech_type_fn
-
-    for i, delete_btn in enumerate(speech_type_delete_btns):
-        delete_fn = make_delete_speech_type_fn(i)
-        delete_btn.click(
-            delete_fn,
+        add_speech_type_btn.click(
+            add_speech_type_fn,
             inputs=speech_type_count,
             outputs=[speech_type_count] + speech_type_names + speech_type_audios + speech_type_ref_texts + speech_type_delete_btns
         )
 
-    # Text input for the prompt
-    gen_text_input_emotional = gr.Textbox(label="Text to Generate", lines=10)
+        # Function to delete a speech type
+        def make_delete_speech_type_fn(index):
+            def delete_speech_type_fn(speech_type_count):
+                # Prepare updates
+                name_updates = []
+                audio_updates = []
+                ref_text_updates = []
+                delete_btn_updates = []
 
-    # Model choice
-    model_choice_emotional = gr.Radio(
-        choices=["F5-TTS", "E2-TTS"], label="Choose TTS Model", value="F5-TTS"
-    )
+                for i in range(max_speech_types - 1):
+                    if i == index:
+                        name_updates.append(gr.update(visible=False, value=''))
+                        audio_updates.append(gr.update(visible=False, value=None))
+                        ref_text_updates.append(gr.update(visible=False, value=''))
+                        delete_btn_updates.append(gr.update(visible=False))
+                    else:
+                        name_updates.append(gr.update())
+                        audio_updates.append(gr.update())
+                        ref_text_updates.append(gr.update())
+                        delete_btn_updates.append(gr.update())
 
-    with gr.Accordion("Advanced Settings", open=False):
-        remove_silence_emotional = gr.Checkbox(
-            label="Remove Silences",
-            value=True,
+                speech_type_count = max(0, speech_type_count - 1)
+
+                return [speech_type_count] + name_updates + audio_updates + ref_text_updates + delete_btn_updates
+
+            return delete_speech_type_fn
+
+        for i, delete_btn in enumerate(speech_type_delete_btns):
+            delete_fn = make_delete_speech_type_fn(i)
+            delete_btn.click(
+                delete_fn,
+                inputs=speech_type_count,
+                outputs=[speech_type_count] + speech_type_names + speech_type_audios + speech_type_ref_texts + speech_type_delete_btns
+            )
+
+        # Text input for the prompt
+        gen_text_input_emotional = gr.Textbox(label="Text to Generate", lines=10)
+
+        # Model choice
+        model_choice_emotional = gr.Radio(
+            choices=["F5-TTS", "E2-TTS"], label="Choose TTS Model", value="F5-TTS"
         )
 
-    # Generate button
-    generate_emotional_btn = gr.Button("Generate Emotional Speech", variant="primary")
+        with gr.Accordion("Advanced Settings", open=False):
+            remove_silence_emotional = gr.Checkbox(
+                label="Remove Silences",
+                value=True,
+            )
 
-    # Output audio
-    audio_output_emotional = gr.Audio(label="Synthesized Audio")
+        # Generate button
+        generate_emotional_btn = gr.Button("Generate Emotional Speech", variant="primary")
 
-    def generate_emotional_speech(
-        regular_audio,
-        regular_ref_text,
-        gen_text,
-        *args,
-    ):
-        num_additional_speech_types = max_speech_types - 1
-        speech_type_names_list = args[:num_additional_speech_types]
-        speech_type_audios_list = args[num_additional_speech_types:2 * num_additional_speech_types]
-        speech_type_ref_texts_list = args[2 * num_additional_speech_types:3 * num_additional_speech_types]
-        model_choice = args[3 * num_additional_speech_types]
-        remove_silence = args[3 * num_additional_speech_types + 1]
+        # Output audio
+        audio_output_emotional = gr.Audio(label="Synthesized Audio")
 
-        # Collect the speech types and their audios into a dict
-        speech_types = {'Regular': {'audio': regular_audio, 'ref_text': regular_ref_text}}
-
-        for name_input, audio_input, ref_text_input in zip(speech_type_names_list, speech_type_audios_list, speech_type_ref_texts_list):
-            if name_input and audio_input:
-                speech_types[name_input] = {'audio': audio_input, 'ref_text': ref_text_input}
-
-        # Parse the gen_text into segments
-        segments = parse_speechtypes_text(gen_text)
-
-        # For each segment, generate speech
-        generated_audio_segments = []
-        current_emotion = 'Regular'
-
-        for segment in segments:
-            emotion = segment['emotion']
-            text = segment['text']
-
-            if emotion in speech_types:
-                current_emotion = emotion
-            else:
-                # If emotion not available, default to Regular
-                current_emotion = 'Regular'
-
-            ref_audio = speech_types[current_emotion]['audio']
-            ref_text = speech_types[current_emotion].get('ref_text', '')
-
-            # Generate speech for this segment
-            audio, _ = infer(ref_audio, ref_text, text, model_choice, remove_silence, "")
-            sr, audio_data = audio
-
-            generated_audio_segments.append(audio_data)
-
-        # Concatenate all audio segments
-        if generated_audio_segments:
-            final_audio_data = np.concatenate(generated_audio_segments)
-            return (sr, final_audio_data)
-        else:
-            gr.Warning("No audio generated.")
-            return None
-
-    generate_emotional_btn.click(
-        generate_emotional_speech,
-        inputs=[
+        def generate_emotional_speech(
             regular_audio,
             regular_ref_text,
-            gen_text_input_emotional,
-        ] + speech_type_names + speech_type_audios + speech_type_ref_texts + [
-            model_choice_emotional,
-            remove_silence_emotional,
-        ],
-        outputs=audio_output_emotional,
-    )
+            gen_text,
+            *args,
+        ):
+            num_additional_speech_types = max_speech_types - 1
+            speech_type_names_list = args[:num_additional_speech_types]
+            speech_type_audios_list = args[num_additional_speech_types:2 * num_additional_speech_types]
+            speech_type_ref_texts_list = args[2 * num_additional_speech_types:3 * num_additional_speech_types]
+            model_choice = args[3 * num_additional_speech_types]
+            remove_silence = args[3 * num_additional_speech_types + 1]
 
-    # Validation function to disable Generate button if speech types are missing
-    def validate_speech_types(
-        gen_text,
-        regular_name,
-        *args
-    ):
-        num_additional_speech_types = max_speech_types - 1
-        speech_type_names_list = args[:num_additional_speech_types]
+            # Collect the speech types and their audios into a dict
+            speech_types = {'Regular': {'audio': regular_audio, 'ref_text': regular_ref_text}}
 
-        # Collect the speech types names
-        speech_types_available = set()
-        if regular_name:
-            speech_types_available.add(regular_name)
-        for name_input in speech_type_names_list:
-            if name_input:
-                speech_types_available.add(name_input)
+            for name_input, audio_input, ref_text_input in zip(speech_type_names_list, speech_type_audios_list, speech_type_ref_texts_list):
+                if name_input and audio_input:
+                    speech_types[name_input] = {'audio': audio_input, 'ref_text': ref_text_input}
 
-        # Parse the gen_text to get the speech types used
-        segments = parse_emotional_text(gen_text)
-        speech_types_in_text = set(segment['emotion'] for segment in segments)
+            # Parse the gen_text into segments
+            segments = parse_speechtypes_text(gen_text)
 
-        # Check if all speech types in text are available
-        missing_speech_types = speech_types_in_text - speech_types_available
+            # For each segment, generate speech
+            generated_audio_segments = []
+            current_emotion = 'Regular'
 
-        if missing_speech_types:
-            # Disable the generate button
-            return gr.update(interactive=False)
-        else:
-            # Enable the generate button
-            return gr.update(interactive=True)
+            for segment in segments:
+                emotion = segment['emotion']
+                text = segment['text']
 
-    gen_text_input_emotional.change(
-        validate_speech_types,
-        inputs=[gen_text_input_emotional, regular_name] + speech_type_names,
-        outputs=generate_emotional_btn
-    )
-with gr.Blocks() as app:
-    gr.Markdown(
-        """
-# E2/F5 TTS
+                if emotion in speech_types:
+                    current_emotion = emotion
+                else:
+                    # If emotion not available, default to Regular
+                    current_emotion = 'Regular'
 
-This is a local web UI for F5 TTS with advanced batch processing support. This app supports the following TTS models:
+                ref_audio = speech_types[current_emotion]['audio']
+                ref_text = speech_types[current_emotion].get('ref_text', '')
 
-* [F5-TTS](https://arxiv.org/abs/2410.06885) (A Fairytaler that Fakes Fluent and Faithful Speech with Flow Matching)
-* [E2 TTS](https://arxiv.org/abs/2406.18009) (Embarrassingly Easy Fully Non-Autoregressive Zero-Shot TTS)
+                # Generate speech for this segment
+                audio, _ = infer(ref_audio, ref_text, text, model_choice, remove_silence, "")
+                sr, audio_data = audio
 
-The checkpoints support English and Chinese.
+                generated_audio_segments.append(audio_data)
 
-If you're having issues, try converting your reference audio to WAV or MP3, clipping it to 15s, and shortening your prompt.
+            # Concatenate all audio segments
+            if generated_audio_segments:
+                final_audio_data = np.concatenate(generated_audio_segments)
+                return (sr, final_audio_data)
+            else:
+                gr.Warning("No audio generated.")
+                return None
 
-**NOTE: Reference text will be automatically transcribed with Whisper if not provided. For best results, keep your reference clips short (<15s). Ensure the audio is fully uploaded before generating.**
-"""
-    )
-    gr.TabbedInterface([app_tts, app_podcast, app_emotional, app_credits], ["TTS", "Podcast", "Multi-Style", "Credits"])
+        generate_emotional_btn.click(
+            generate_emotional_speech,
+            inputs=[
+                regular_audio,
+                regular_ref_text,
+                gen_text_input_emotional,
+            ] + speech_type_names + speech_type_audios + speech_type_ref_texts + [
+                model_choice_emotional,
+                remove_silence_emotional,
+            ],
+            outputs=audio_output_emotional,
+        )
 
+        # Validation function to disable Generate button if speech types are missing
+        def validate_speech_types(
+            gen_text,
+            regular_name,
+            *args
+        ):
+            num_additional_speech_types = max_speech_types - 1
+            speech_type_names_list = args[:num_additional_speech_types]
+
+            # Collect the speech types names
+            speech_types_available = set()
+            if regular_name:
+                speech_types_available.add(regular_name)
+            for name_input in speech_type_names_list:
+                if name_input:
+                    speech_types_available.add(name_input)
+
+            # Parse the gen_text to get the speech types used
+            segments = parse_emotional_text(gen_text)
+            speech_types_in_text = set(segment['emotion'] for segment in segments)
+
+            # Check if all speech types in text are available
+            missing_speech_types = speech_types_in_text - speech_types_available
+
+            if missing_speech_types:
+                # Disable the generate button
+                return gr.update(interactive=False)
+            else:
+                # Enable the generate button
+                return gr.update(interactive=True)
+
+        gen_text_input_emotional.change(
+            validate_speech_types,
+            inputs=[gen_text_input_emotional, regular_name] + speech_type_names,
+            outputs=generate_emotional_btn
+        )
+    
 @click.command()
 @click.option("--port", "-p", default=None, type=int, help="Port to run the app on")
 @click.option("--host", "-H", default=None, help="Host to run the app on")
