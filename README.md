@@ -20,12 +20,6 @@ git clone https://github.com/SWivid/F5-TTS.git
 cd F5-TTS
 ```
 
-Install packages:
-
-```bash
-pip install -r requirements.txt
-```
-
 Install torch with your CUDA version, e.g. :
 
 ```bash
@@ -33,7 +27,11 @@ pip install torch==2.3.0+cu118 --extra-index-url https://download.pytorch.org/wh
 pip install torchaudio==2.3.0+cu118 --extra-index-url https://download.pytorch.org/whl/cu118
 ```
 
-**Note**: install numpy with version < 2.x, e.g. `pip install numpy==1.22.0`.
+Install other packages:
+
+```bash
+pip install -r requirements.txt
+```
 
 ## Prepare Dataset
 
@@ -91,6 +89,10 @@ python inference-cli.py \
 ```
 
 ### Gradio App
+Currently supported features:
+- Chunk inference
+- Podcast Generation
+- Multiple Speech-Type Generation
 
 You can launch a Gradio app (web interface) to launch a GUI for inference (will load ckpt from Huggingface, you may set `ckpt_path` to local file in `gradio_app.py`). Currently load ASR model, F5-TTS and E2 TTS all in once, thus use more GPU memory than `inference-cli`.
 
