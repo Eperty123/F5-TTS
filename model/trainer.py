@@ -10,8 +10,6 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset, SequentialSampler
 from torch.optim.lr_scheduler import LinearLR, SequentialLR
 
-from einops import rearrange
-
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs
 
@@ -45,7 +43,8 @@ class Trainer:
         wandb_resume_id: str = None,
         last_per_steps = None,
         accelerate_kwargs: dict = dict(),
-        ema_kwargs: dict = dict()
+        ema_kwargs: dict = dict(),
+        bnb_optimizer: bool = False,
     ):
         
         ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters = True)
@@ -107,7 +106,11 @@ class Trainer:
 
         self.duration_predictor = duration_predictor
 
-        self.optimizer = AdamW(model.parameters(), lr=learning_rate)
+        if bnb_optimizer:
+            import bitsandbytes as bnb
+            self.optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=learning_rate)
+        else:
+            self.optimizer = AdamW(model.parameters(), lr=learning_rate)
         self.model, self.optimizer = self.accelerator.prepare(
             self.model, self.optimizer
         )
@@ -217,7 +220,7 @@ class Trainer:
             for batch in progress_bar:
                 with self.accelerator.accumulate(self.model):
                     text_inputs = batch['text']
-                    mel_spec = rearrange(batch['mel'], 'b d n -> b n d')
+                    mel_spec = batch['mel'].permute(0, 2, 1)
                     mel_lengths = batch["mel_lengths"]
 
                     # TODO. add duration predictor training
