@@ -23,10 +23,10 @@ from datasets.arrow_writer import ArrowWriter
 from safetensors.torch import save_file
 from scipy.io import wavfile
 from transformers import pipeline
-
+from cached_path import cached_path
 from f5_tts.api import F5TTS
 from f5_tts.model.utils import convert_char_to_pinyin
-
+from importlib.resources import files
 
 training_process = None
 system = platform.system()
@@ -34,12 +34,129 @@ python_executable = sys.executable or "python"
 tts_api = None
 last_checkpoint = ""
 last_device = ""
+last_ema = None
 
-path_data = "data"
+
+path_data = str(files("f5_tts").joinpath("../../data"))
+path_project_ckpts = str(files("f5_tts").joinpath("../../ckpts"))
+file_train = "src/f5_tts/train/finetune_cli.py"
 
 device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
 pipe = None
+
+
+# Save settings from a JSON file
+def save_settings(
+    project_name,
+    exp_name,
+    learning_rate,
+    batch_size_per_gpu,
+    batch_size_type,
+    max_samples,
+    grad_accumulation_steps,
+    max_grad_norm,
+    epochs,
+    num_warmup_updates,
+    save_per_updates,
+    last_per_steps,
+    finetune,
+    file_checkpoint_train,
+    tokenizer_type,
+    tokenizer_file,
+    mixed_precision,
+):
+    path_project = os.path.join(path_project_ckpts, project_name)
+    os.makedirs(path_project, exist_ok=True)
+    file_setting = os.path.join(path_project, "setting.json")
+
+    settings = {
+        "exp_name": exp_name,
+        "learning_rate": learning_rate,
+        "batch_size_per_gpu": batch_size_per_gpu,
+        "batch_size_type": batch_size_type,
+        "max_samples": max_samples,
+        "grad_accumulation_steps": grad_accumulation_steps,
+        "max_grad_norm": max_grad_norm,
+        "epochs": epochs,
+        "num_warmup_updates": num_warmup_updates,
+        "save_per_updates": save_per_updates,
+        "last_per_steps": last_per_steps,
+        "finetune": finetune,
+        "file_checkpoint_train": file_checkpoint_train,
+        "tokenizer_type": tokenizer_type,
+        "tokenizer_file": tokenizer_file,
+        "mixed_precision": mixed_precision,
+    }
+    with open(file_setting, "w") as f:
+        json.dump(settings, f, indent=4)
+    return "Settings saved!"
+
+
+# Load settings from a JSON file
+def load_settings(project_name):
+    project_name = project_name.replace("_pinyin", "").replace("_char", "")
+    path_project = os.path.join(path_project_ckpts, project_name)
+    file_setting = os.path.join(path_project, "setting.json")
+
+    if not os.path.isfile(file_setting):
+        settings = {
+            "exp_name": "F5TTS_Base",
+            "learning_rate": 1e-05,
+            "batch_size_per_gpu": 1000,
+            "batch_size_type": "frame",
+            "max_samples": 64,
+            "grad_accumulation_steps": 1,
+            "max_grad_norm": 1,
+            "epochs": 100,
+            "num_warmup_updates": 2,
+            "save_per_updates": 300,
+            "last_per_steps": 200,
+            "finetune": True,
+            "file_checkpoint_train": "",
+            "tokenizer_type": "pinyin",
+            "tokenizer_file": "",
+            "mixed_precision": "none",
+        }
+        return (
+            settings["exp_name"],
+            settings["learning_rate"],
+            settings["batch_size_per_gpu"],
+            settings["batch_size_type"],
+            settings["max_samples"],
+            settings["grad_accumulation_steps"],
+            settings["max_grad_norm"],
+            settings["epochs"],
+            settings["num_warmup_updates"],
+            settings["save_per_updates"],
+            settings["last_per_steps"],
+            settings["finetune"],
+            settings["file_checkpoint_train"],
+            settings["tokenizer_type"],
+            settings["tokenizer_file"],
+            settings["mixed_precision"],
+        )
+
+    with open(file_setting, "r") as f:
+        settings = json.load(f)
+    return (
+        settings["exp_name"],
+        settings["learning_rate"],
+        settings["batch_size_per_gpu"],
+        settings["batch_size_type"],
+        settings["max_samples"],
+        settings["grad_accumulation_steps"],
+        settings["max_grad_norm"],
+        settings["epochs"],
+        settings["num_warmup_updates"],
+        settings["save_per_updates"],
+        settings["last_per_steps"],
+        settings["finetune"],
+        settings["file_checkpoint_train"],
+        settings["tokenizer_type"],
+        settings["tokenizer_file"],
+        settings["mixed_precision"],
+    )
 
 
 # Load metadata
@@ -290,7 +407,7 @@ def start_training(
         elif dataset_name.endswith("_char"):
             tokenizer_type = "char"
     else:
-        tokenizer_file = "custom"
+        tokenizer_type = "custom"
 
     dataset_name = dataset_name.replace("_pinyin", "").replace("_char", "")
 
@@ -300,7 +417,7 @@ def start_training(
         fp16 = ""
 
     cmd = (
-        f"accelerate launch {fp16} finetune-cli.py --exp_name {exp_name} "
+        f"accelerate launch {fp16} {file_train} --exp_name {exp_name} "
         f"--learning_rate {learning_rate} "
         f"--batch_size_per_gpu {batch_size_per_gpu} "
         f"--batch_size_type {batch_size_type} "
@@ -325,6 +442,26 @@ def start_training(
     cmd += f" --tokenizer {tokenizer_type} "
 
     print(cmd)
+
+    save_settings(
+        dataset_name,
+        exp_name,
+        learning_rate,
+        batch_size_per_gpu,
+        batch_size_type,
+        max_samples,
+        grad_accumulation_steps,
+        max_grad_norm,
+        epochs,
+        num_warmup_updates,
+        save_per_updates,
+        last_per_steps,
+        finetune,
+        file_checkpoint_train,
+        tokenizer_type,
+        tokenizer_file,
+        mixed_precision,
+    )
 
     try:
         # Start the training process
@@ -362,8 +499,8 @@ def stop_training():
 
 def get_list_projects():
     project_list = []
-    for folder in os.listdir("data"):
-        path_folder = os.path.join("data", folder)
+    for folder in os.listdir(path_data):
+        path_folder = os.path.join(path_data, folder)
         if not os.path.isdir(path_folder):
             continue
         folder = folder.lower()
@@ -560,10 +697,11 @@ def create_metadata(name_project, ch_tokenizer, progress=gr.Progress()):
 
     new_vocal = ""
     if not ch_tokenizer:
-        file_vocab_finetune = "data/Emilia_ZH_EN_pinyin/vocab.txt"
-        if not os.path.isfile(file_vocab_finetune):
-            return "Error: Vocabulary file 'Emilia_ZH_EN_pinyin' not found!"
-        shutil.copy2(file_vocab_finetune, file_vocab)
+        if not os.path.isfile(file_vocab):
+            file_vocab_finetune = os.path.join(path_data, "Emilia_ZH_EN_pinyin/vocab.txt")
+            if not os.path.isfile(file_vocab_finetune):
+                return "Error: Vocabulary file 'Emilia_ZH_EN_pinyin' not found!", ""
+            shutil.copy2(file_vocab_finetune, file_vocab)
 
         with open(file_vocab, "r", encoding="utf-8-sig") as f:
             vocab_char_map = {}
@@ -660,12 +798,14 @@ def calculate_train(
 
     num_warmup_updates = int(samples * 0.05)
     save_per_updates = int(samples * 0.10)
-    last_per_steps = int(save_per_updates * 5)
+    last_per_steps = int(save_per_updates * 0.25)
 
     max_samples = (lambda num: num + 1 if num % 2 != 0 else num)(max_samples)
     num_warmup_updates = (lambda num: num + 1 if num % 2 != 0 else num)(num_warmup_updates)
     save_per_updates = (lambda num: num + 1 if num % 2 != 0 else num)(save_per_updates)
     last_per_steps = (lambda num: num + 1 if num % 2 != 0 else num)(last_per_steps)
+    if last_per_steps <= 0:
+        last_per_steps = 2
 
     total_hours = hours
     mel_hop_length = 256
@@ -726,15 +866,111 @@ def extract_and_save_ema_model(checkpoint_path: str, new_checkpoint_path: str, s
         return f"An error occurred: {e}"
 
 
+def expand_model_embeddings(ckpt_path, new_ckpt_path, num_new_tokens=42):
+    seed = 666
+    random.seed(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+
+    ema_sd = ckpt.get("ema_model_state_dict", {})
+    embed_key_ema = "ema_model.transformer.text_embed.text_embed.weight"
+    old_embed_ema = ema_sd[embed_key_ema]
+
+    vocab_old = old_embed_ema.size(0)
+    embed_dim = old_embed_ema.size(1)
+    vocab_new = vocab_old + num_new_tokens
+
+    def expand_embeddings(old_embeddings):
+        new_embeddings = torch.zeros((vocab_new, embed_dim))
+        new_embeddings[:vocab_old] = old_embeddings
+        new_embeddings[vocab_old:] = torch.randn((num_new_tokens, embed_dim))
+        return new_embeddings
+
+    ema_sd[embed_key_ema] = expand_embeddings(ema_sd[embed_key_ema])
+
+    torch.save(ckpt, new_ckpt_path)
+
+    return vocab_new
+
+
+def vocab_count(text):
+    return str(len(text.split(",")))
+
+
+def vocab_extend(project_name, symbols, model_type):
+    if symbols == "":
+        return "Symbols empty!"
+
+    name_project = project_name
+    path_project = os.path.join(path_data, name_project)
+    file_vocab_project = os.path.join(path_project, "vocab.txt")
+
+    file_vocab = os.path.join(path_data, "Emilia_ZH_EN_pinyin/vocab.txt")
+    if not os.path.isfile(file_vocab):
+        return f"the file {file_vocab} not found !"
+
+    symbols = symbols.split(",")
+    if symbols == []:
+        return "Symbols to extend not found."
+
+    with open(file_vocab, "r", encoding="utf-8-sig") as f:
+        data = f.read()
+        vocab = data.split("\n")
+    vocab_check = set(vocab)
+
+    miss_symbols = []
+    for item in symbols:
+        item = item.replace(" ", "")
+        if item in vocab_check:
+            continue
+        miss_symbols.append(item)
+
+    if miss_symbols == []:
+        return "Symbols are okay no need to extend."
+
+    size_vocab = len(vocab)
+    vocab.pop()
+    for item in miss_symbols:
+        vocab.append(item)
+
+    vocab.append("")
+
+    with open(file_vocab_project, "w", encoding="utf-8") as f:
+        f.write("\n".join(vocab))
+
+    if model_type == "F5-TTS":
+        ckpt_path = str(cached_path("hf://SWivid/F5-TTS/F5TTS_Base/model_1200000.pt"))
+    else:
+        ckpt_path = str(cached_path("hf://SWivid/E2-TTS/E2TTS_Base/model_1200000.pt"))
+
+    vocab_size_new = len(miss_symbols)
+
+    dataset_name = name_project.replace("_pinyin", "").replace("_char", "")
+    new_ckpt_path = os.path.join(path_project_ckpts, dataset_name)
+    os.makedirs(new_ckpt_path, exist_ok=True)
+    new_ckpt_file = os.path.join(new_ckpt_path, "model_1200000.pt")
+
+    size = expand_model_embeddings(ckpt_path, new_ckpt_file, num_new_tokens=vocab_size_new)
+
+    vocab_new = "\n".join(miss_symbols)
+    return f"vocab old size : {size_vocab}\nvocab new size : {size}\nvocab add : {vocab_size_new}\nnew symbols :\n{vocab_new}"
+
+
 def vocab_check(project_name):
     name_project = project_name
     path_project = os.path.join(path_data, name_project)
 
     file_metadata = os.path.join(path_project, "metadata.csv")
 
-    file_vocab = "data/Emilia_ZH_EN_pinyin/vocab.txt"
+    file_vocab = os.path.join(path_data, "Emilia_ZH_EN_pinyin/vocab.txt")
     if not os.path.isfile(file_vocab):
-        return f"the file {file_vocab} not found !"
+        return f"the file {file_vocab} not found !", ""
 
     with open(file_vocab, "r", encoding="utf-8-sig") as f:
         data = f.read()
@@ -742,7 +978,7 @@ def vocab_check(project_name):
         vocab = set(vocab)
 
     if not os.path.isfile(file_metadata):
-        return f"the file {file_metadata} not found !"
+        return f"the file {file_metadata} not found !", ""
 
     with open(file_metadata, "r", encoding="utf-8-sig") as f:
         data = f.read()
@@ -760,12 +996,15 @@ def vocab_check(project_name):
             if t not in vocab and t not in miss_symbols_keep:
                 miss_symbols.append(t)
                 miss_symbols_keep[t] = t
+
     if miss_symbols == []:
+        vocab_miss = ""
         info = "You can train using your language !"
     else:
-        info = f"The following symbols are missing in your language : {len(miss_symbols)}\n\n" + "\n".join(miss_symbols)
+        vocab_miss = ",".join(miss_symbols)
+        info = f"The following symbols are missing in your language {len(miss_symbols)}\n\n"
 
-    return info
+    return info, vocab_miss
 
 
 def get_random_sample_prepare(project_name):
@@ -816,8 +1055,8 @@ def get_random_sample_infer(project_name):
     )
 
 
-def infer(file_checkpoint, exp_name, ref_text, ref_audio, gen_text, nfe_step):
-    global last_checkpoint, last_device, tts_api
+def infer(file_checkpoint, exp_name, ref_text, ref_audio, gen_text, nfe_step, use_ema):
+    global last_checkpoint, last_device, tts_api, last_ema
 
     if not os.path.isfile(file_checkpoint):
         return None, "checkpoint not found!"
@@ -827,15 +1066,19 @@ def infer(file_checkpoint, exp_name, ref_text, ref_audio, gen_text, nfe_step):
     else:
         device_test = None
 
-    if last_checkpoint != file_checkpoint or last_device != device_test:
+    if last_checkpoint != file_checkpoint or last_device != device_test or last_ema != use_ema:
         if last_checkpoint != file_checkpoint:
             last_checkpoint = file_checkpoint
+
         if last_device != device_test:
             last_device = device_test
 
-        tts_api = F5TTS(model_type=exp_name, ckpt_file=file_checkpoint, device=device_test)
+        if last_ema != use_ema:
+            last_ema = use_ema
 
-        print("update", device_test, file_checkpoint)
+        tts_api = F5TTS(model_type=exp_name, ckpt_file=file_checkpoint, device=device_test, use_ema=use_ema)
+
+        print("update >> ", device_test, file_checkpoint, use_ema)
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
         tts_api.infer(gen_text=gen_text, ref_text=ref_text, ref_file=ref_audio, nfe_step=nfe_step, file_wave=f.name)
@@ -850,10 +1093,9 @@ def get_checkpoints_project(project_name, is_gradio=True):
     if project_name is None:
         return [], ""
     project_name = project_name.replace("_pinyin", "").replace("_char", "")
-    path_project_ckpts = os.path.join("ckpts", project_name)
 
     if os.path.isdir(path_project_ckpts):
-        files_checkpoints = glob(os.path.join(path_project_ckpts, "*.pt"))
+        files_checkpoints = glob(os.path.join(path_project_ckpts, project_name, "*.pt"))
         files_checkpoints = sorted(
             files_checkpoints,
             key=lambda x: int(os.path.basename(x).split("_")[1].split(".")[0])
@@ -1005,6 +1247,38 @@ for tutorial and updates check here (https://github.com/SWivid/F5-TTS/discussion
                 outputs=[random_text_transcribe, random_audio_transcribe],
             )
 
+        with gr.TabItem("vocab check"):
+            gr.Markdown("""```plaintext 
+check the vocabulary for fine-tuning Emilia_ZH_EN to ensure all symbols are included. for finetune new language
+```""")
+
+            check_button = gr.Button("check vocab")
+            txt_info_check = gr.Text(label="info", value="")
+
+            gr.Markdown("""```plaintext 
+Using the extended model, you can fine-tune to a new language that is missing symbols in the vocab , this create a new model with a new vocabulary size and save it in your ckpts/project folder.
+```""")
+
+            exp_name_extend = gr.Radio(label="Model", choices=["F5-TTS", "E2-TTS"], value="F5-TTS")
+
+            with gr.Row():
+                txt_extend = gr.Textbox(
+                    label="Symbols",
+                    value="",
+                    placeholder="To add new symbols, make sure to use ',' for each symbol",
+                    scale=6,
+                )
+                txt_count_symbol = gr.Textbox(label="new size vocab", value="", scale=1)
+
+            extend_button = gr.Button("Extended")
+            txt_info_extend = gr.Text(label="info", value="")
+
+            txt_extend.change(vocab_count, inputs=[txt_extend], outputs=[txt_count_symbol])
+            check_button.click(fn=vocab_check, inputs=[cm_project], outputs=[txt_info_check, txt_extend])
+            extend_button.click(
+                fn=vocab_extend, inputs=[cm_project, txt_extend, exp_name_extend], outputs=[txt_info_extend]
+            )
+
         with gr.TabItem("prepare Data"):
             gr.Markdown(
                 """```plaintext    
@@ -1026,7 +1300,7 @@ for tutorial and updates check here (https://github.com/SWivid/F5-TTS/discussion
 
      ```"""
             )
-            ch_tokenizern = gr.Checkbox(label="create vocabulary from dataset", value=False)
+            ch_tokenizern = gr.Checkbox(label="create vocabulary", value=False, visible=False)
             bt_prepare = bt_create = gr.Button("prepare")
             txt_info_prepare = gr.Text(label="info", value="")
             txt_vocab_prepare = gr.Text(label="vocab", value="")
@@ -1037,7 +1311,7 @@ for tutorial and updates check here (https://github.com/SWivid/F5-TTS/discussion
             random_sample_prepare = gr.Button("random sample")
 
             with gr.Row():
-                random_text_prepare = gr.Text(label="Pinyin")
+                random_text_prepare = gr.Text(label="Tokenizer")
                 random_audio_prepare = gr.Audio(label="Audio", type="filepath")
 
             random_sample_prepare.click(
@@ -1045,6 +1319,10 @@ for tutorial and updates check here (https://github.com/SWivid/F5-TTS/discussion
             )
 
         with gr.TabItem("train Data"):
+            gr.Markdown("""```plaintext 
+The auto-setting is still experimental. Please make sure that the epochs , save per updates , and last per steps are set correctly, or change them manually as needed.
+If you encounter a memory error, try reducing the batch size per GPU to a smaller number.
+```""")
             with gr.Row():
                 bt_calculate = bt_create = gr.Button("Auto Settings")
                 lb_samples = gr.Label(label="samples")
@@ -1053,7 +1331,7 @@ for tutorial and updates check here (https://github.com/SWivid/F5-TTS/discussion
             with gr.Row():
                 ch_finetune = bt_create = gr.Checkbox(label="finetune", value=True)
                 tokenizer_file = gr.Textbox(label="Tokenizer File", value="")
-                file_checkpoint_train = gr.Textbox(label="Pretrain Model", value="")
+                file_checkpoint_train = gr.Textbox(label="Path to the preetrain checkpoint ", value="")
 
             with gr.Row():
                 exp_name = gr.Radio(label="Model", choices=["F5TTS_Base", "E2TTS_Base"], value="F5TTS_Base")
@@ -1079,6 +1357,42 @@ for tutorial and updates check here (https://github.com/SWivid/F5-TTS/discussion
                 mixed_precision = gr.Radio(label="mixed_precision", choices=["none", "fp16", "fpb16"], value="none")
                 start_button = gr.Button("Start Training")
                 stop_button = gr.Button("Stop Training", interactive=False)
+
+            if projects_selelect is not None:
+                (
+                    exp_namev,
+                    learning_ratev,
+                    batch_size_per_gpuv,
+                    batch_size_typev,
+                    max_samplesv,
+                    grad_accumulation_stepsv,
+                    max_grad_normv,
+                    epochsv,
+                    num_warmupv_updatesv,
+                    save_per_updatesv,
+                    last_per_stepsv,
+                    finetunev,
+                    file_checkpoint_trainv,
+                    tokenizer_typev,
+                    tokenizer_filev,
+                    mixed_precisionv,
+                ) = load_settings(projects_selelect)
+                exp_name.value = exp_namev
+                learning_rate.value = learning_ratev
+                batch_size_per_gpu.value = batch_size_per_gpuv
+                batch_size_type.value = batch_size_typev
+                max_samples.value = max_samplesv
+                grad_accumulation_steps.value = grad_accumulation_stepsv
+                max_grad_norm.value = max_grad_normv
+                epochs.value = epochsv
+                num_warmup_updates.value = num_warmupv_updatesv
+                save_per_updates.value = save_per_updatesv
+                last_per_steps.value = last_per_stepsv
+                ch_finetune.value = finetunev
+                file_checkpoint_train.value = file_checkpoint_train
+                tokenizer_type.value = tokenizer_typev
+                tokenizer_file.value = tokenizer_filev
+                mixed_precision.value = mixed_precisionv
 
             txt_info_train = gr.Text(label="info", value="")
             start_button.click(
@@ -1134,29 +1448,38 @@ for tutorial and updates check here (https://github.com/SWivid/F5-TTS/discussion
                 check_finetune, inputs=[ch_finetune], outputs=[file_checkpoint_train, tokenizer_file, tokenizer_type]
             )
 
-        with gr.TabItem("reduse checkpoint"):
-            txt_path_checkpoint = gr.Text(label="path checkpoint :")
-            txt_path_checkpoint_small = gr.Text(label="path output :")
-            ch_safetensors = gr.Checkbox(label="safetensors", value="")
-            txt_info_reduse = gr.Text(label="info", value="")
-            reduse_button = gr.Button("reduse")
-            reduse_button.click(
-                fn=extract_and_save_ema_model,
-                inputs=[txt_path_checkpoint, txt_path_checkpoint_small, ch_safetensors],
-                outputs=[txt_info_reduse],
+            cm_project.change(
+                fn=load_settings,
+                inputs=[cm_project],
+                outputs=[
+                    exp_name,
+                    learning_rate,
+                    batch_size_per_gpu,
+                    batch_size_type,
+                    max_samples,
+                    grad_accumulation_steps,
+                    max_grad_norm,
+                    epochs,
+                    num_warmup_updates,
+                    save_per_updates,
+                    last_per_steps,
+                    ch_finetune,
+                    file_checkpoint_train,
+                    tokenizer_type,
+                    tokenizer_file,
+                    mixed_precision,
+                ],
             )
 
-        with gr.TabItem("vocab check"):
-            check_button = gr.Button("check vocab")
-            txt_info_check = gr.Text(label="info", value="")
-            check_button.click(fn=vocab_check, inputs=[cm_project], outputs=[txt_info_check])
-
         with gr.TabItem("test model"):
+            gr.Markdown("""```plaintext 
+SOS : check the use_ema setting (True or False) for your model to see what works best for you. 
+```""")
             exp_name = gr.Radio(label="Model", choices=["F5-TTS", "E2-TTS"], value="F5-TTS")
             list_checkpoints, checkpoint_select = get_checkpoints_project(projects_selelect, False)
 
             nfe_step = gr.Number(label="n_step", value=32)
-
+            ch_use_ema = gr.Checkbox(label="use ema", value=True)
             with gr.Row():
                 cm_checkpoint = gr.Dropdown(
                     choices=list_checkpoints, value=checkpoint_select, label="checkpoints", allow_custom_value=True
@@ -1168,6 +1491,7 @@ for tutorial and updates check here (https://github.com/SWivid/F5-TTS/discussion
             ref_text = gr.Textbox(label="ref text")
             ref_audio = gr.Audio(label="audio ref", type="filepath")
             gen_text = gr.Textbox(label="gen text")
+
             random_sample_infer.click(
                 fn=get_random_sample_infer, inputs=[cm_project], outputs=[ref_text, gen_text, ref_audio]
             )
@@ -1180,12 +1504,27 @@ for tutorial and updates check here (https://github.com/SWivid/F5-TTS/discussion
 
             check_button_infer.click(
                 fn=infer,
-                inputs=[cm_checkpoint, exp_name, ref_text, ref_audio, gen_text, nfe_step],
+                inputs=[cm_checkpoint, exp_name, ref_text, ref_audio, gen_text, nfe_step, ch_use_ema],
                 outputs=[gen_audio, txt_info_gpu],
             )
 
             bt_checkpoint_refresh.click(fn=get_checkpoints_project, inputs=[cm_project], outputs=[cm_checkpoint])
             cm_project.change(fn=get_checkpoints_project, inputs=[cm_project], outputs=[cm_checkpoint])
+
+        with gr.TabItem("reduse checkpoint"):
+            gr.Markdown("""```plaintext 
+Reduce the model size from 5GB to 1.3GB. The new checkpoint can be used for inference or fine-tuning afterward, but it cannot be used to continue training..
+```""")
+            txt_path_checkpoint = gr.Text(label="path checkpoint :")
+            txt_path_checkpoint_small = gr.Text(label="path output :")
+            ch_safetensors = gr.Checkbox(label="safetensors", value="")
+            txt_info_reduse = gr.Text(label="info", value="")
+            reduse_button = gr.Button("reduse")
+            reduse_button.click(
+                fn=extract_and_save_ema_model,
+                inputs=[txt_path_checkpoint, txt_path_checkpoint_small, ch_safetensors],
+                outputs=[txt_info_reduse],
+            )
 
         with gr.TabItem("system info"):
             output_box = gr.Textbox(label="GPU and CPU Information", lines=20)
