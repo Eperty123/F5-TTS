@@ -1,3 +1,7 @@
+import threading
+import queue
+import re
+
 import gc
 import json
 import os
@@ -65,6 +69,7 @@ def save_settings(
     tokenizer_type,
     tokenizer_file,
     mixed_precision,
+    logger,
 ):
     path_project = os.path.join(path_project_ckpts, project_name)
     os.makedirs(path_project, exist_ok=True)
@@ -87,6 +92,7 @@ def save_settings(
         "tokenizer_type": tokenizer_type,
         "tokenizer_file": tokenizer_file,
         "mixed_precision": mixed_precision,
+        "logger": logger,
     }
     with open(file_setting, "w") as f:
         json.dump(settings, f, indent=4)
@@ -111,12 +117,13 @@ def load_settings(project_name):
             "epochs": 100,
             "num_warmup_updates": 2,
             "save_per_updates": 300,
-            "last_per_steps": 200,
+            "last_per_steps": 100,
             "finetune": True,
             "file_checkpoint_train": "",
             "tokenizer_type": "pinyin",
             "tokenizer_file": "",
             "mixed_precision": "none",
+            "logger": "wandb",
         }
         return (
             settings["exp_name"],
@@ -135,10 +142,13 @@ def load_settings(project_name):
             settings["tokenizer_type"],
             settings["tokenizer_file"],
             settings["mixed_precision"],
+            settings["logger"],
         )
 
     with open(file_setting, "r") as f:
         settings = json.load(f)
+        if "logger" not in settings:
+            settings["logger"] = "wandb"
     return (
         settings["exp_name"],
         settings["learning_rate"],
@@ -156,6 +166,7 @@ def load_settings(project_name):
         settings["tokenizer_type"],
         settings["tokenizer_file"],
         settings["mixed_precision"],
+        settings["logger"],
     )
 
 
@@ -369,8 +380,10 @@ def start_training(
     tokenizer_type="pinyin",
     tokenizer_file="",
     mixed_precision="fp16",
+    stream=False,
+    logger="wandb",
 ):
-    global training_process, tts_api
+    global training_process, tts_api, stop_signal
 
     if tts_api is not None:
         del tts_api
@@ -430,6 +443,7 @@ def start_training(
         f"--last_per_steps {last_per_steps} "
         f"--dataset_name {dataset_name}"
     )
+
     if finetune:
         cmd += f" --finetune {finetune}"
 
@@ -440,6 +454,8 @@ def start_training(
         cmd += f" --tokenizer_path {tokenizer_file}"
 
     cmd += f" --tokenizer {tokenizer_type} "
+
+    cmd += f" --log_samples True --logger {logger} "
 
     print(cmd)
 
@@ -461,17 +477,116 @@ def start_training(
         tokenizer_type,
         tokenizer_file,
         mixed_precision,
+        logger,
     )
 
     try:
-        # Start the training process
-        training_process = subprocess.Popen(cmd, shell=True)
+        if not stream:
+            # Start the training process
+            training_process = subprocess.Popen(cmd, shell=True)
 
-        time.sleep(5)
-        yield "train start", gr.update(interactive=False), gr.update(interactive=True)
+            time.sleep(5)
+            yield "train start", gr.update(interactive=False), gr.update(interactive=True)
 
-        # Wait for the training process to finish
-        training_process.wait()
+            # Wait for the training process to finish
+            training_process.wait()
+        else:
+
+            def stream_output(pipe, output_queue):
+                try:
+                    for line in iter(pipe.readline, ""):
+                        output_queue.put(line)
+                except Exception as e:
+                    output_queue.put(f"Error reading pipe: {str(e)}")
+                finally:
+                    pipe.close()
+
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
+
+            training_process = subprocess.Popen(
+                cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1, env=env
+            )
+            yield "Training started...", gr.update(interactive=False), gr.update(interactive=True)
+
+            stdout_queue = queue.Queue()
+            stderr_queue = queue.Queue()
+
+            stdout_thread = threading.Thread(target=stream_output, args=(training_process.stdout, stdout_queue))
+            stderr_thread = threading.Thread(target=stream_output, args=(training_process.stderr, stderr_queue))
+            stdout_thread.daemon = True
+            stderr_thread.daemon = True
+            stdout_thread.start()
+            stderr_thread.start()
+            stop_signal = False
+            while True:
+                if stop_signal:
+                    training_process.terminate()
+                    time.sleep(0.5)
+                    if training_process.poll() is None:
+                        training_process.kill()
+                    yield "Training stopped by user.", gr.update(interactive=True), gr.update(interactive=False)
+                    break
+
+                process_status = training_process.poll()
+
+                # Handle stdout
+                try:
+                    while True:
+                        output = stdout_queue.get_nowait()
+                        print(output, end="")
+                        match = re.search(
+                            r"Epoch (\d+)/(\d+):\s+(\d+)%\|.*\[(\d+:\d+)<.*?loss=(\d+\.\d+), step=(\d+)", output
+                        )
+                        if match:
+                            current_epoch = match.group(1)
+                            total_epochs = match.group(2)
+                            percent_complete = match.group(3)
+                            elapsed_time = match.group(4)
+                            loss = match.group(5)
+                            current_step = match.group(6)
+                            message = (
+                                f"Epoch: {current_epoch}/{total_epochs}, "
+                                f"Progress: {percent_complete}%, "
+                                f"Elapsed Time: {elapsed_time}, "
+                                f"Loss: {loss}, "
+                                f"Step: {current_step}"
+                            )
+                            yield message, gr.update(interactive=False), gr.update(interactive=True)
+                        elif output.strip():
+                            yield output, gr.update(interactive=False), gr.update(interactive=True)
+                except queue.Empty:
+                    pass
+
+                # Handle stderr
+                try:
+                    while True:
+                        error_output = stderr_queue.get_nowait()
+                        print(error_output, end="")
+                        if error_output.strip():
+                            yield f"{error_output.strip()}", gr.update(interactive=False), gr.update(interactive=True)
+                except queue.Empty:
+                    pass
+
+                if process_status is not None and stdout_queue.empty() and stderr_queue.empty():
+                    if process_status != 0:
+                        yield (
+                            f"Process crashed with exit code {process_status}!",
+                            gr.update(interactive=False),
+                            gr.update(interactive=True),
+                        )
+                    else:
+                        yield "Training complete!", gr.update(interactive=False), gr.update(interactive=True)
+                    break
+
+                # Small sleep to prevent CPU thrashing
+                time.sleep(0.1)
+
+            # Clean up
+            training_process.stdout.close()
+            training_process.stderr.close()
+            training_process.wait()
+
         time.sleep(1)
 
         if training_process is None:
@@ -489,11 +604,13 @@ def start_training(
 
 
 def stop_training():
-    global training_process
+    global training_process, stop_signal
+
     if training_process is None:
         return "Train not run !", gr.update(interactive=True), gr.update(interactive=False)
     terminate_process_tree(training_process.pid)
-    training_process = None
+    # training_process = None
+    stop_signal = True
     return "train stop", gr.update(interactive=True), gr.update(interactive=False)
 
 
@@ -620,6 +737,39 @@ def format_seconds_to_hms(seconds):
     return "{:02d}:{:02d}:{:02d}".format(hours, minutes, int(seconds))
 
 
+def get_correct_audio_path(
+    audio_input,
+    base_path="wavs",
+    supported_formats=("wav", "mp3", "aac", "flac", "m4a", "alac", "ogg", "aiff", "wma", "amr"),
+):
+    file_audio = None
+
+    # Helper function to check if file has a supported extension
+    def has_supported_extension(file_name):
+        return any(file_name.endswith(f".{ext}") for ext in supported_formats)
+
+    # Case 1: If it's a full path with a valid extension, use it directly
+    if os.path.isabs(audio_input) and has_supported_extension(audio_input):
+        file_audio = audio_input
+
+    # Case 2: If it has a supported extension but is not a full path
+    elif has_supported_extension(audio_input) and not os.path.isabs(audio_input):
+        file_audio = os.path.join(base_path, audio_input)
+        print("2")
+
+    # Case 3: If only the name is given (no extension and not a full path)
+    elif not has_supported_extension(audio_input) and not os.path.isabs(audio_input):
+        print("3")
+        for ext in supported_formats:
+            potential_file = os.path.join(base_path, f"{audio_input}.{ext}")
+            if os.path.exists(potential_file):
+                file_audio = potential_file
+                break
+        else:
+            file_audio = os.path.join(base_path, f"{audio_input}.{supported_formats[0]}")
+    return file_audio
+
+
 def create_metadata(name_project, ch_tokenizer, progress=gr.Progress()):
     path_project = os.path.join(path_data, name_project)
     path_project_wavs = os.path.join(path_project, "wavs")
@@ -649,7 +799,7 @@ def create_metadata(name_project, ch_tokenizer, progress=gr.Progress()):
             continue
         name_audio, text = sp_line[:2]
 
-        file_audio = os.path.join(path_project_wavs, name_audio + ".wav")
+        file_audio = get_correct_audio_path(name_audio, path_project_wavs)
 
         if not os.path.isfile(file_audio):
             error_files.append([file_audio, "error path"])
@@ -662,8 +812,8 @@ def create_metadata(name_project, ch_tokenizer, progress=gr.Progress()):
             print(f"Error processing {file_audio}: {e}")
             continue
 
-        if duration < 1 and duration > 25:
-            error_files.append([file_audio, "duration < 1 and > 25 "])
+        if duration < 1 or duration > 25:
+            error_files.append([file_audio, "duration < 1 or > 25 "])
             continue
         if len(text) < 4:
             error_files.append([file_audio, "very small text len 3"])
@@ -1055,7 +1205,7 @@ def get_random_sample_infer(project_name):
     )
 
 
-def infer(file_checkpoint, exp_name, ref_text, ref_audio, gen_text, nfe_step, use_ema):
+def infer(project, file_checkpoint, exp_name, ref_text, ref_audio, gen_text, nfe_step, use_ema):
     global last_checkpoint, last_device, tts_api, last_ema
 
     if not os.path.isfile(file_checkpoint):
@@ -1076,7 +1226,11 @@ def infer(file_checkpoint, exp_name, ref_text, ref_audio, gen_text, nfe_step, us
         if last_ema != use_ema:
             last_ema = use_ema
 
-        tts_api = F5TTS(model_type=exp_name, ckpt_file=file_checkpoint, device=device_test, use_ema=use_ema)
+        vocab_file = os.path.join(path_data, project, "vocab.txt")
+
+        tts_api = F5TTS(
+            model_type=exp_name, ckpt_file=file_checkpoint, vocab_file=vocab_file, device=device_test, use_ema=use_ema
+        )
 
         print("update >> ", device_test, file_checkpoint, use_ema)
 
@@ -1111,6 +1265,27 @@ def get_checkpoints_project(project_name, is_gradio=True):
         return gr.update(choices=files_checkpoints, value=selelect_checkpoint)
 
     return files_checkpoints, selelect_checkpoint
+
+
+def get_audio_project(project_name, is_gradio=True):
+    if project_name is None:
+        return [], ""
+    project_name = project_name.replace("_pinyin", "").replace("_char", "")
+
+    if os.path.isdir(path_project_ckpts):
+        files_audios = glob(os.path.join(path_project_ckpts, project_name, "samples", "*.wav"))
+        files_audios = sorted(files_audios, key=lambda x: int(os.path.basename(x).split("_")[1].split(".")[0]))
+
+        files_audios = [item.replace("_gen.wav", "") for item in files_audios if item.endswith("_gen.wav")]
+    else:
+        files_audios = []
+
+    selelect_checkpoint = None if not files_audios else files_audios[0]
+
+    if is_gradio:
+        return gr.update(choices=files_audios, value=selelect_checkpoint)
+
+    return files_audios, selelect_checkpoint
 
 
 def get_gpu_stats():
@@ -1180,6 +1355,17 @@ def get_combined_stats():
     return combined_stats
 
 
+def get_audio_select(file_sample):
+    select_audio_ref = file_sample
+    select_audio_gen = file_sample
+
+    if file_sample is not None:
+        select_audio_ref += "_ref.wav"
+        select_audio_gen += "_gen.wav"
+
+    return select_audio_ref, select_audio_gen
+
+
 with gr.Blocks() as app:
     gr.Markdown(
         """
@@ -1202,12 +1388,20 @@ for tutorial and updates check here (https://github.com/SWivid/F5-TTS/discussion
         project_name = gr.Textbox(label="project name", value="my_speak")
         bt_create = gr.Button("create new project")
 
-    cm_project = gr.Dropdown(choices=projects, value=projects_selelect, label="Project", allow_custom_value=True)
+    with gr.Row():
+        cm_project = gr.Dropdown(
+            choices=projects, value=projects_selelect, label="Project", allow_custom_value=True, scale=6
+        )
+        ch_refresh_project = gr.Button("refresh", scale=1)
 
     bt_create.click(fn=create_data_project, inputs=[project_name, tokenizer_type], outputs=[cm_project])
 
     with gr.Tabs():
         with gr.TabItem("transcribe Data"):
+            gr.Markdown("""```plaintext 
+Skip this step if you have your dataset, metadata.csv, and a folder wavs with all the audio files.                 
+```""")
+
             ch_manual = gr.Checkbox(label="audio from path", value=False)
 
             mark_info_transcribe = gr.Markdown(
@@ -1280,9 +1474,17 @@ Using the extended model, you can fine-tune to a new language that is missing sy
             )
 
         with gr.TabItem("prepare Data"):
+            gr.Markdown("""```plaintext 
+Skip this step if you have your dataset, raw.arrow , duraction.json and vocab.txt
+```""")
+
             gr.Markdown(
                 """```plaintext    
-     place all your wavs folder and your metadata.csv file in {your name project}                                 
+     place all your wavs folder and your metadata.csv file in {your name project}  
+
+     suport format for audio "wav", "mp3", "aac", "flac", "m4a", "alac", "ogg", "aiff", "wma", "amr"
+
+     example wav format                               
      my_speak/
      │
      ├── wavs/
@@ -1292,10 +1494,10 @@ Using the extended model, you can fine-tune to a new language that is missing sy
      │
      └── metadata.csv
       
-     file format metadata.csv
+     file format metadata.csv 
 
-     audio1|text1
-     audio2|text1
+     audio1|text1 or audio1.wav|text1 or your_path/audio1.wav|text1 
+     audio2|text1 or audio2.wav|text1 or your_path/audio1.wav|text1 
      ...
 
      ```"""
@@ -1304,6 +1506,7 @@ Using the extended model, you can fine-tune to a new language that is missing sy
             bt_prepare = bt_create = gr.Button("prepare")
             txt_info_prepare = gr.Text(label="info", value="")
             txt_vocab_prepare = gr.Text(label="vocab", value="")
+
             bt_prepare.click(
                 fn=create_metadata, inputs=[cm_project, ch_tokenizern], outputs=[txt_info_prepare, txt_vocab_prepare]
             )
@@ -1347,14 +1550,15 @@ If you encounter a memory error, try reducing the batch size per GPU to a smalle
 
             with gr.Row():
                 epochs = gr.Number(label="Epochs", value=10)
-                num_warmup_updates = gr.Number(label="Warmup Updates", value=5)
+                num_warmup_updates = gr.Number(label="Warmup Updates", value=2)
 
             with gr.Row():
-                save_per_updates = gr.Number(label="Save per Updates", value=10)
-                last_per_steps = gr.Number(label="Last per Steps", value=50)
+                save_per_updates = gr.Number(label="Save per Updates", value=300)
+                last_per_steps = gr.Number(label="Last per Steps", value=100)
 
             with gr.Row():
                 mixed_precision = gr.Radio(label="mixed_precision", choices=["none", "fp16", "fpb16"], value="none")
+                cd_logger = gr.Radio(label="logger", choices=["wandb", "tensorboard"], value="wandb")
                 start_button = gr.Button("Start Training")
                 stop_button = gr.Button("Stop Training", interactive=False)
 
@@ -1376,6 +1580,7 @@ If you encounter a memory error, try reducing the batch size per GPU to a smalle
                     tokenizer_typev,
                     tokenizer_filev,
                     mixed_precisionv,
+                    cd_loggerv,
                 ) = load_settings(projects_selelect)
                 exp_name.value = exp_namev
                 learning_rate.value = learning_ratev
@@ -1389,12 +1594,47 @@ If you encounter a memory error, try reducing the batch size per GPU to a smalle
                 save_per_updates.value = save_per_updatesv
                 last_per_steps.value = last_per_stepsv
                 ch_finetune.value = finetunev
-                file_checkpoint_train.value = file_checkpoint_train
+                file_checkpoint_train.value = file_checkpoint_trainv
                 tokenizer_type.value = tokenizer_typev
                 tokenizer_file.value = tokenizer_filev
                 mixed_precision.value = mixed_precisionv
+                cd_logger.value = cd_loggerv
 
+            ch_stream = gr.Checkbox(label="stream output experiment.", value=True)
             txt_info_train = gr.Text(label="info", value="")
+
+            list_audios, select_audio = get_audio_project(projects_selelect, False)
+
+            select_audio_ref = select_audio
+            select_audio_gen = select_audio
+
+            if select_audio is not None:
+                select_audio_ref += "_ref.wav"
+                select_audio_gen += "_gen.wav"
+
+            with gr.Row():
+                ch_list_audio = gr.Dropdown(
+                    choices=list_audios,
+                    value=select_audio,
+                    label="audios",
+                    allow_custom_value=True,
+                    scale=6,
+                    interactive=True,
+                )
+                bt_stream_audio = gr.Button("refresh", scale=1)
+                bt_stream_audio.click(fn=get_audio_project, inputs=[cm_project], outputs=[ch_list_audio])
+                cm_project.change(fn=get_audio_project, inputs=[cm_project], outputs=[ch_list_audio])
+
+            with gr.Row():
+                audio_ref_stream = gr.Audio(label="original", type="filepath", value=select_audio_ref)
+                audio_gen_stream = gr.Audio(label="generate", type="filepath", value=select_audio_gen)
+
+            ch_list_audio.change(
+                fn=get_audio_select,
+                inputs=[ch_list_audio],
+                outputs=[audio_ref_stream, audio_gen_stream],
+            )
+
             start_button.click(
                 fn=start_training,
                 inputs=[
@@ -1415,6 +1655,8 @@ If you encounter a memory error, try reducing the batch size per GPU to a smalle
                     tokenizer_type,
                     tokenizer_file,
                     mixed_precision,
+                    ch_stream,
+                    cd_logger,
                 ],
                 outputs=[txt_info_train, start_button, stop_button],
             )
@@ -1448,10 +1690,8 @@ If you encounter a memory error, try reducing the batch size per GPU to a smalle
                 check_finetune, inputs=[ch_finetune], outputs=[file_checkpoint_train, tokenizer_file, tokenizer_type]
             )
 
-            cm_project.change(
-                fn=load_settings,
-                inputs=[cm_project],
-                outputs=[
+            def setup_load_settings():
+                output_components = [
                     exp_name,
                     learning_rate,
                     batch_size_per_gpu,
@@ -1468,7 +1708,23 @@ If you encounter a memory error, try reducing the batch size per GPU to a smalle
                     tokenizer_type,
                     tokenizer_file,
                     mixed_precision,
-                ],
+                    cd_logger,
+                ]
+
+                return output_components
+
+            outputs = setup_load_settings()
+
+            cm_project.change(
+                fn=load_settings,
+                inputs=[cm_project],
+                outputs=outputs,
+            )
+
+            ch_refresh_project.click(
+                fn=load_settings,
+                inputs=[cm_project],
+                outputs=outputs,
             )
 
         with gr.TabItem("test model"):
@@ -1504,7 +1760,7 @@ SOS : check the use_ema setting (True or False) for your model to see what works
 
             check_button_infer.click(
                 fn=infer,
-                inputs=[cm_checkpoint, exp_name, ref_text, ref_audio, gen_text, nfe_step, ch_use_ema],
+                inputs=[cm_project, cm_checkpoint, exp_name, ref_text, ref_audio, gen_text, nfe_step, ch_use_ema],
                 outputs=[gen_audio, txt_info_gpu],
             )
 
